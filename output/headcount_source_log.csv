@@ -1,0 +1,6 @@
+state,url,status,message,persons,firms_35_75,date
+NY,https://data.ny.gov/api/views/yg7h-zjbf/rows.csv?accessType=DOWNLOAD,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
+CT,https://data.ct.gov/api/views/6tja-6vdt/rows.csv?accessType=DOWNLOAD,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
+TX,https://data.texas.gov/resource/s7ft-44qi.json?$limit=2000000,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
+FL,https://www2.myfloridalicense.com/sto/file_download/extracts/RE_licensee_all.csv,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
+CA,https://secure.dre.ca.gov/datafile/CurrList.zip,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
