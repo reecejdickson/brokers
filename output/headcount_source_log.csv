@@ -1,6 +1,12 @@
-state,url,status,message,persons,firms_35_75,date
-NY,https://data.ny.gov/api/views/yg7h-zjbf/rows.csv?accessType=DOWNLOAD,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
-CT,https://data.ct.gov/api/views/6tja-6vdt/rows.csv?accessType=DOWNLOAD,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
-TX,https://data.texas.gov/resource/s7ft-44qi.json?$limit=2000000,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
-FL,https://www2.myfloridalicense.com/sto/file_download/extracts/RE_licensee_all.csv,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
-CA,https://secure.dre.ca.gov/datafile/CurrList.zip,download_failed,curl: (22) The requested URL returned error: 403,0,0,2026-10-09
+state,source,status,message,firms_total,firms_35_75,count_definition,date
+NY,https://data.ny.gov/api/views/yg7h-zjbf/rows.csv?accessType=DOWNLOAD,ok,,25692,184,"people = salespersons + all broker licence types whose business_name is the firm (firm key = business name, all NY offices combined)",2026-10-09
+CT,https://data.ct.gov/api/views/eqtn-rppv/rows.csv?accessType=DOWNLOAD ; https://data.ct.gov/api/views/fwpc-pgqj/rows.csv?accessType=DOWNLOAD,ok,,2073,34,people = ACTIVE salespersons whose supervising broker licence is the firm (brokers are not linked to firms in CT data),2026-10-09
+TX,https://data.texas.gov/api/views/s7ft-44qi/rows.csv?accessType=DOWNLOAD,ok,,20329,251,people = ACTIVE sales agents sponsored by the firm licence + its designated broker (other brokers are not linked in TX data),2026-10-09
+FL,https://www2.myfloridalicense.com/sto/file_download/extracts//REALESTATE2501LICENSE_1.csv ; https://www2.myfloridalicense.com/sto/file_download/extracts//RealEstateCorpLicense.csv,ok,,34783,546,people = Current/Active sales associates + brokers + broker-sales whose employer licence is the firm,2026-10-09
+CA,https://secure.dre.ca.gov/datafile/CurrList.zip ; https://secure.dre.ca.gov/datafile/broker_associates_list.xls,ok,,34506,349,people = Licensed salespersons + broker associates + corporate officers whose responsible broker is the firm,2026-10-09
+CO,https://apps2.colorado.gov/dre/licensing/Lookup/GenerateRoster.aspx (Active Associate Brokers + Active Responsible Brokers + Active Real Estate Companies rosters),ok,,5851,66,people = Active associate + responsible brokers whose roster Entity Name is the firm,2026-10-09
+OR,https://orea.elicense.micropact.com/Lookup/GenerateRoster.aspx (Active Individuals + Active Businesses rosters),ok,,2980,57,people = ACTIVE brokers + principal brokers associated to the registered business name (RBN) licence,2026-10-09
+OH,https://elicense3.com.ohio.gov/Lookup/GenerateRoster.aspx (Real Estate and Profession Licensing roster),ok,,2105,78,people = ACTIVE salespersons (incl. management level) whose employer credential is the firm (brokers not linked in OH data),2026-10-09
+NV,https://red.nv.gov/uploadedFiles/rednvgov/Content/Administration/Public_Records/NRED-ACTIVE-SALESPERSONS.xlsx ; NRED-ACTIVE-BROKER-SALESPERSONS.xlsx,ok,,1593,56,people = active salespersons + broker-salespersons whose Company is the firm (firm key = company name),2026-10-09
+AZ,https://services.azre.gov/PdbWeb/List/DownloadList/1 ; https://services.azre.gov/PdbWeb/List/DownloadList/2,ok,,6515,139,people = Active real estate licensees whose EmployerLicNumber is the firm,2026-10-09
+WV,https://rec.wv.gov/media/8/download?inline ; https://rec.wv.gov/media/9/download?inline ; https://rec.wv.gov/media/10/download?inline,ok,,856,11,people = salespersons + associate brokers + brokers on the active rosters under the CompanyNumber,2026-10-09

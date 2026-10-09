@@ -1,172 +1,338 @@
 """Step 2: download free regulator rosters that link licensees to firms, count ACTIVE
-individual licensees per firm, keep firms with 35-75 (inclusive).
+individual licensees (people, not firm records) per firm, keep firms with 35-75.
 
-Each adapter yields normalised person rows; firms are never counted as their own
-licensee. A count covers only that source's jurisdiction.
+A count covers only that source's jurisdiction (multi-state firms may be undercounted).
 Usage: python 02_headcount.py RAW_DIR OUT_CSV LOG_CSV
 """
-import csv, io, json, os, re, subprocess, sys, zipfile, datetime
-from collections import defaultdict
+import csv, io, os, re, subprocess, sys, zipfile, datetime
+from collections import Counter, defaultdict
 
 RAW, OUT, LOG = sys.argv[1:4]
 os.makedirs(RAW, exist_ok=True)
 TODAY = datetime.date.today().isoformat()
+csv.field_size_limit(10**8)
 
 
-def fetch(url, dest):
-    """curl with retries; returns (ok, message). Never fabricates data on failure."""
-    if os.path.exists(dest) and os.path.getsize(dest) > 0:
-        return True, "cached"
-    r = subprocess.run(["curl", "-sS", "-L", "--fail", "--retry", "4", "--retry-delay", "2",
-                        "-m", "1800", "-o", dest, url], capture_output=True, text=True)
-    if r.returncode != 0:
-        if os.path.exists(dest):
-            os.remove(dest)
-        return False, r.stderr.strip()[:200]
-    return True, "downloaded"
+def fetch(url, fn):
+    dest = os.path.join(RAW, fn)
+    if not (os.path.exists(dest) and os.path.getsize(dest) > 0):
+        r = subprocess.run(["curl", "-sS", "-L", "--fail", "--retry", "4", "--retry-delay", "2",
+                            "-m", "3600", "-A", "Mozilla/5.0", "-o", dest, url], capture_output=True, text=True)
+        if r.returncode != 0:
+            if os.path.exists(dest):
+                os.remove(dest)
+            raise RuntimeError("download failed: " + r.stderr.strip()[:200])
+    return dest
 
 
-def norm(s):
-    return re.sub(r"\s+", " ", (s or "").strip().upper())
+def N(s):
+    return re.sub(r"\s+", " ", (s or "").replace("\x00", "").strip().upper())
 
 
-def pick(row, *cands):
-    keys = {k.lower().strip(): k for k in row}
-    for c in cands:
-        if c in keys:
-            return row[keys[c]]
-    raise KeyError(f"none of {cands} in columns {list(row)[:30]}")
+class Firms:
+    """firm_key -> people set + descriptive fields."""
+    def __init__(self):
+        self.people = defaultdict(set)
+        self.info = {}
+        self.addr_votes = defaultdict(Counter)
+
+    def add(self, key, person, name=None):
+        self.people[key].add(person)
+        if name and key not in self.info:
+            self.info[key] = dict(name=name)
+
+    def set_info(self, key, **kw):
+        self.info.setdefault(key, {}).update({k: v for k, v in kw.items() if v})
 
 
-# ---------- adapters: each returns list of dicts ----------
-# person_id, firm_key, firm_name, address, city, state, zip
-
-def ny(path):
-    out = []
-    for r in csv.DictReader(open(path, encoding="utf-8", errors="replace")):
-        lt = norm(pick(r, "license type", "license_type"))
-        if not lt or any(x in lt for x in ("CORPORAT", "PARTNERSHIP", "LLC", "TRADE NAME", "OFFICE", "BRANCH")):
-            continue  # business records are not people
-        firm = norm(pick(r, "business name", "business_name"))
+# ---------------- NY: data.ny.gov yg7h-zjbf (active licenses only) ----------------
+def ny():
+    url = "https://data.ny.gov/api/views/yg7h-zjbf/rows.csv?accessType=DOWNLOAD"
+    f = Firms()
+    offices = {}
+    for r in csv.DictReader(open(fetch(url, "ny.csv"), encoding="utf-8", errors="replace")):
+        r = {k.strip().lower().replace(" ", "_"): v for k, v in r.items()}
+        lt, firm = N(r["license_type"]), N(r["business_name"])
         if not firm:
             continue
-        exp = pick(r, "license expiration date", "license_expiration_date")
-        out.append(dict(person_id=pick(r, "license number", "license_number"), firm_key=firm,
-                        firm_name=firm, address=norm(pick(r, "business address 1", "business_address_1")),
-                        city=norm(pick(r, "business city", "business_city")), state="NY",
-                        zip=(pick(r, "business zip", "business_zip") or "")[:5], exp=exp))
-    return out  # dataset only contains ACTIVE licenses
-
-
-def ct(path):
-    out = []
-    for r in csv.DictReader(open(path, encoding="utf-8", errors="replace")):
-        b = norm(pick(r, "broker credential", "broker_credential"))
-        if not b:
+        addr = (N(r.get("business_address_1")), N(r.get("business_city")), N(r.get("business_state")),
+                (r.get("business_zip") or "")[:5])
+        if lt == "REAL ESTATE PRINCIPAL OFFICE":
+            offices.setdefault(firm, addr); continue
+        if lt == "REAL ESTATE BRANCH OFFICE":
             continue
-        out.append(dict(person_id=pick(r, "salesperson credential", "salesperson_credential"),
-                        firm_key=b, firm_name=norm(pick(r, "broker name", "broker_name")),
-                        address="", city="", state="CT", zip=""))
-    return out  # active salespersons only; supervising brokers themselves not listed
+        f.add(firm, r["license_number"], firm)
+        f.addr_votes[firm][addr] += 1
+    for k in f.people:
+        a = offices.get(k) or f.addr_votes[k].most_common(1)[0][0]
+        f.set_info(k, address=a[0], city=a[1], addr_state=a[2], zip=a[3])
+    return f, url, "people = salespersons + all broker licence types whose business_name is the firm (firm key = business name, all NY offices combined)"
 
 
-FL_COLS = ["board", "occ_code", "name", "dba", "rank", "addr1", "addr2", "addr3", "city", "state",
-           "zip", "county", "lic_no", "primary_status", "secondary_status", "orig_date",
-           "status_date", "exp_date", "alt_lic", "self_prop", "employer_name", "employer_lic"]
-
-
-def fl(path):
-    out = []
-    for row in csv.reader(open(path, encoding="latin-1")):
-        if len(row) < len(FL_COLS):
+# ---------------- CT: data.ct.gov eqtn-rppv + fwpc-pgqj ----------------
+def ct():
+    u1 = "https://data.ct.gov/api/views/eqtn-rppv/rows.csv?accessType=DOWNLOAD"
+    u2 = "https://data.ct.gov/api/views/fwpc-pgqj/rows.csv?accessType=DOWNLOAD"
+    f = Firms()
+    for r in csv.DictReader(open(fetch(u1, "ct_sales.csv"), encoding="utf-8", errors="replace")):
+        r = {k.strip().lower().replace(" ", "_"): v for k, v in r.items()}
+        b = N(r.get("broker_license"))
+        if N(r["status"]) != "ACTIVE" or not b:
             continue
-        r = dict(zip(FL_COLS, row))
-        if norm(r["primary_status"]) != "C" or norm(r["secondary_status"]) != "A":
-            continue  # keep Current + Active only
-        if norm(r["rank"]) not in ("SL", "BK", "SL ", "BL"):  # sales associate / broker (individual ranks)
+        f.add(b, r["fullcredentialcode"], N(r.get("supervising_broker")))
+    for r in csv.DictReader(open(fetch(u2, "ct_brokers.csv"), encoding="utf-8", errors="replace")):
+        r = {k.strip().lower().replace(" ", "_"): v for k, v in r.items()}
+        k = N(r["fullcredentialcode"])
+        if k in f.people:
+            f.set_info(k, name=N(r.get("businessname")) or N(r.get("dba")) or N(r["name"]),
+                       city=N(r.get("city")), addr_state=N(r.get("state")), zip=(r.get("zip") or "")[:5])
+    return f, u1 + " ; " + u2, "people = ACTIVE salespersons whose supervising broker licence is the firm (brokers are not linked to firms in CT data)"
+
+
+# ---------------- TX: data.texas.gov s7ft-44qi ----------------
+def tx():
+    url = "https://data.texas.gov/api/views/s7ft-44qi/rows.csv?accessType=DOWNLOAD"
+    f = Firms()
+    for r in csv.DictReader(open(fetch(url, "tx.csv"), encoding="utf-8", errors="replace")):
+        r = {k.strip().lower().replace(" ", "_"): v for k, v in r.items()}
+        lt, st, rel = N(r["license_type"]), N(r["status"]), N(r["related_license_number"])
+        active = st == "ACTIVE" or st.endswith("- ACTIVE")
+        if not active:
             continue
-        emp = norm(r["employer_lic"])
-        if not emp:
+        if lt == "SALES AGENT" and rel:
+            f.add(rel, r["license_number"], N(r["related_license_full_name"]))
+        elif lt == "BROKER COMPANY":
+            k = N(r["license_number"])
+            f.set_info(k, name=N(r["full_name"]), county=N(r["county"]))
+            if rel:  # the company's designated broker
+                f.add(k, rel)
+        elif lt == "BROKER INDIVIDUAL":
+            f.set_info(N(r["license_number"]), county=N(r["county"]))
+    return f, url, "people = ACTIVE sales agents sponsored by the firm licence + its designated broker (other brokers are not linked in TX data)"
+
+
+# ---------------- FL: DBPR extracts ----------------
+FLC = ["occ", "name", "dba", "rank", "a1", "a2", "a3", "city", "state", "zip", "county", "lic",
+       "pstat", "sstat", "orig", "eff", "exp", "alt", "selfprop", "emp_name", "emp_lic"]
+
+
+def fl():
+    u1 = "https://www2.myfloridalicense.com/sto/file_download/extracts//REALESTATE2501LICENSE_1.csv"
+    u2 = "https://www2.myfloridalicense.com/sto/file_download/extracts//RealEstateCorpLicense.csv"
+    f = Firms()
+    for row in csv.reader(open(fetch(u1, "fl_sales.csv"), encoding="latin-1")):
+        r = dict(zip(FLC, row))
+        if N(r.get("pstat")) != "CURRENT" or N(r.get("sstat")) != "ACTIVE" or not N(r.get("emp_lic")):
             continue
-        out.append(dict(person_id=r["lic_no"], firm_key=emp, firm_name=norm(r["employer_name"]),
-                        address="", city="", state="FL", zip=""))
-    return out
+        f.add(N(r["emp_lic"]), r["alt"] or r["lic"], N(r["emp_name"]))
+    for row in csv.reader(open(fetch(u2, "fl_corp.csv"), encoding="latin-1")):
+        r = dict(zip(FLC, row))
+        k = N(r.get("lic"))
+        if k in f.people:
+            f.set_info(k, name=N(r["name"]), dba=N(r["dba"]), address=N(r["a1"]), city=N(r["city"]),
+                       addr_state=N(r["state"]), zip=(r["zip"] or "")[:5])
+    return f, u1 + " ; " + u2, "people = Current/Active sales associates + brokers + broker-sales whose employer licence is the firm"
 
 
-def tx(path):
-    out = []
-    for r in json.load(open(path)):
-        lt = norm(r.get("license_type", ""))
-        st = norm(r.get("license_status", r.get("status", "")))
-        if "ACTIVE" not in st or lt.startswith("BROKER COMPANY") or "COMPANY" in lt or "BUSINESS" in lt:
-            continue
-        firm = norm(r.get("related_license_number") or r.get("sponsor_license_number") or "")
-        if not firm:
-            continue
-        out.append(dict(person_id=r.get("license_number"), firm_key=firm,
-                        firm_name=norm(r.get("related_license_name") or r.get("sponsor_name") or ""),
-                        address="", city="", state="TX", zip=""))
-    return out
+# ---------------- CA: DRE licensee list + broker associate list ----------------
+def ca():
+    u1 = "https://secure.dre.ca.gov/datafile/CurrList.zip"
+    u2 = "https://secure.dre.ca.gov/datafile/broker_associates_list.xls"
+    f = Firms()
+    zf = zipfile.ZipFile(fetch(u1, "ca.zip"))
+    rows = list(csv.DictReader(io.TextIOWrapper(zf.open(zf.namelist()[0]), encoding="latin-1")))
+    entity = {}
+    for r in rows:
+        if r["lic_status"] == "Licensed" and r["lic_type"] in ("Corporation", "Broker"):
+            entity[r["lic_number"]] = r
+    for r in rows:
+        if r["lic_status"] != "Licensed":
+            continue  # 'Licensed NBA' = no employing broker
+        if r["lic_type"] == "Salesperson" and r["related_lic_type"] in ("Corporation", "Broker") and r["related_lic_number"]:
+            f.add(r["related_lic_number"], r["lic_number"])
+        elif r["lic_type"] == "Officer" and r["related_lic_type"] == "Corporation":
+            # officer row: lic_number is the officer's broker licence, related = corporation
+            f.add(r["related_lic_number"], r["lic_number"])
+    # broker associates (xls has >65k-row quirks; read with patched xlrd)
+    import xlrd, xlrd.sheet as S
+    orig = S.Sheet.__init__
+    def init(self, *a, **k):
+        orig(self, *a, **k); self.utter_max_rows = 10**7
+    S.Sheet.__init__ = init
+    sh = xlrd.open_workbook(fetch(u2, "ca_ba.xls"), ragged_rows=True, logfile=open(os.devnull, "w")).sheet_by_index(0)
+    hdr = [str(c).strip("\x00 ") for c in sh.row_values(0)]
+    for i in range(1, sh.nrows):
+        r = dict(zip(hdr, [str(c).strip("\x00 ") for c in sh.row_values(i)]))
+        if r.get("rb_license_id") and r.get("ba_license_id"):
+            f.add(r["rb_license_id"], r["ba_license_id"])
+    for k in f.people:
+        e = entity.get(k)
+        if e:
+            name = e["lastname_primary"] if e["lic_type"] == "Corporation" else \
+                f"{e['firstname_secondary']} {e['lastname_primary']}".strip()
+            f.set_info(k, name=N(name), address=N(e["address_1"]), city=N(e["city"]),
+                       addr_state=N(e["state"]), zip=(e["zip_code"] or "")[:5])
+    return f, u1 + " ; " + u2, "people = Licensed salespersons + broker associates + corporate officers whose responsible broker is the firm"
 
 
-def ca(path):
-    out = []
-    z = zipfile.ZipFile(path) if path.endswith(".zip") else None
-    fh = io.TextIOWrapper(z.open(z.namelist()[0]), encoding="latin-1") if z else open(path, encoding="latin-1")
-    for r in csv.DictReader(fh):
-        if norm(pick(r, "lic_status")) != "LICENSED" or norm(pick(r, "lic_type")) not in ("SALESPERSON", "BROKER"):
-            continue
-        rel = norm(pick(r, "related_lic_number"))
-        if not rel:
-            continue
-        out.append(dict(person_id=pick(r, "lic_number"), firm_key=rel,
-                        firm_name=norm(pick(r, "related_lastname_primary")),
-                        address="", city=norm(pick(r, "city")), state="CA", zip=""))
-    return out
+def xlsx_rows(path):
+    import openpyxl
+    ws = openpyxl.load_workbook(path, read_only=True).active
+    it = ws.iter_rows(values_only=True)
+    hdr = [str(h or "").strip() for h in next(it)]
+    for row in it:
+        yield {h: ("" if v is None else str(v).replace("\t", "").strip()) for h, v in zip(hdr, row)}
 
 
-# NY/CT/TX URLs are the Socrata export endpoints of the datasets named in
-# output/sources_checked.csv. FL and CA direct file paths could NOT be confirmed in this
-# run (hosts blocked); confirm them on the landing pages before running:
-#   FL https://www2.myfloridalicense.com/real-estate-commission/public-records/
-#   CA https://www.dre.ca.gov/Licensees/ExamineeLicenseeListDataFiles.html
-SOURCES = [
-    ("NY", "https://data.ny.gov/api/views/yg7h-zjbf/rows.csv?accessType=DOWNLOAD", "ny.csv", ny),
-    ("CT", "https://data.ct.gov/api/views/6tja-6vdt/rows.csv?accessType=DOWNLOAD", "ct.csv", ct),
-    ("TX", "https://data.texas.gov/resource/s7ft-44qi.json?$limit=2000000", "tx.json", tx),
-    ("FL", "https://www2.myfloridalicense.com/sto/file_download/extracts/RE_licensee_all.csv", "fl.csv", fl),  # UNCONFIRMED path,
-    ("CA", "https://secure.dre.ca.gov/datafile/CurrList.zip", "ca.zip", ca),  # UNCONFIRMED path,
-]
+def micropact(base, sub, pat):
+    d = os.path.join(RAW, sub)
+    if not os.path.isdir(d) or not any(f.endswith(".csv") for f in os.listdir(d)):
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "micropact_roster.py"), base, d, pat],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError("roster generation failed: " + r.stderr[-300:])
+    return d
 
+
+# ---------------- CO: DORA Division of Real Estate rosters ----------------
+def co():
+    base = "https://apps2.colorado.gov/dre/licensing/Lookup/GenerateRoster.aspx"
+    d = micropact(base, "co", "Real Estate Companies|Associate Brokers|Responsible Brokers")
+    f = Firms()
+    for fn in ("Active_Associate_Brokers.csv", "Active_Responsible_Brokers.csv"):
+        for r in csv.DictReader(open(os.path.join(d, fn), encoding="latin-1")):
+            ent = N(r.get("Entity Name"))
+            if ent and N(r.get("Status")) == "ACTIVE":
+                f.add(ent, r["Credential Type Prefix"] + r["Credential Number"], ent)
+    for r in csv.DictReader(open(os.path.join(d, "Active_Real_Estate_Companies.csv"), encoding="latin-1")):
+        k = N(r["Entity Name"])
+        if k in f.people:
+            f.set_info(k, name=k, dba=N(r.get("DBA")), address=N(r.get("Address Line 1")), city=N(r.get("City")),
+                       addr_state=N(r.get("State")), zip=(r.get("ZipCode") or "")[:5], reg_phone=r.get("Phone", ""))
+    return f, base + " (Active Associate Brokers + Active Responsible Brokers + Active Real Estate Companies rosters)", \
+        "people = Active associate + responsible brokers whose roster Entity Name is the firm"
+
+
+# ---------------- OR: Real Estate Agency eLicense rosters ----------------
+def or_():
+    base = "https://orea.elicense.micropact.com/Lookup/GenerateRoster.aspx"
+    d = micropact(base, "or", "^Active Businesses|^Active Individuals")
+    f = Firms()
+    rows = list(csv.reader(open(os.path.join(d, "Active_Individuals.csv"), encoding="latin-1")))[1:]
+    for x in rows:
+        if len(x) > 25 and x[22].strip().upper() == "ACTIVE" and x[17].strip() in ("B", "PB") and x[25].strip():
+            f.add(x[25].strip(), x[18].strip(), N(x[23]))
+    for x in list(csv.reader(open(os.path.join(d, "Active_Businesses.csv"), encoding="latin-1")))[1:]:
+        k = x[15].strip() if len(x) > 15 else ""
+        if k in f.people:
+            f.set_info(k, name=N(x[0]), address=N(x[2]), city=N(x[6]), addr_state=N(x[8]), zip=x[9][:5],
+                       reg_phone=x[12])
+    return f, base + " (Active Individuals + Active Businesses rosters)", \
+        "people = ACTIVE brokers + principal brokers associated to the registered business name (RBN) licence"
+
+
+# ---------------- OH: Division of Real Estate roster ----------------
+def oh():
+    base = "https://elicense3.com.ohio.gov/Lookup/GenerateRoster.aspx"
+    d = micropact(base, "oh", "Real Estate")
+    f = Firms()
+    rows = list(csv.DictReader(open(os.path.join(d, "Real_Estate_and_Profession_Licensing.csv"), encoding="latin-1")))
+    for r in rows:
+        if r["Status"] == "ACTIVE" and "Salesperson" in r["Credential Type"] and r["Employer/Supervisor Credential"]:
+            f.add(r["Employer/Supervisor Credential"], r["Credential"], N(r["Employer/Supervisor Name"]))
+    for r in rows:
+        k = r["Credential"]
+        if k in f.people:
+            f.set_info(k, name=N(r["Company Name"]) or f.info.get(k, {}).get("name"),
+                       dba=N(r.get("Employer/Supervisor DBA")), address=N(r["Address1"]), city=N(r["City"]),
+                       addr_state=N(r["State"]), zip=(r["Zip Code"] or "")[:5])
+    return f, base + " (Real Estate and Profession Licensing roster)", \
+        "people = ACTIVE salespersons (incl. management level) whose employer credential is the firm (brokers not linked in OH data)"
+
+
+# ---------------- NV: Real Estate Division active licensee lists ----------------
+def nv():
+    b = "https://red.nv.gov/uploadedFiles/rednvgov/Content/Administration/Public_Records/"
+    f = Firms()
+    for fn in ("NRED-ACTIVE-SALESPERSONS.xlsx", "NRED-ACTIVE-BROKER-SALESPERSONS.xlsx"):
+        for r in xlsx_rows(fetch(b + fn, "nv_" + fn)):
+            k = N(r["Company"])
+            if k:
+                f.add(k, r["License No"], k)
+                f.addr_votes[k][(N(r["Address"]), N(r["City"]), N(r["State"]), r["Zip Code"][:5])] += 1
+    for k in f.people:
+        a = f.addr_votes[k].most_common(1)[0][0]
+        f.set_info(k, address=a[0], city=a[1], addr_state=a[2], zip=a[3])
+    return f, b + "NRED-ACTIVE-SALESPERSONS.xlsx ; NRED-ACTIVE-BROKER-SALESPERSONS.xlsx", \
+        "people = active salespersons + broker-salespersons whose Company is the firm (firm key = company name)"
+
+
+# ---------------- AZ: ADRE public database lists ----------------
+def az():
+    u1, u2 = "https://services.azre.gov/PdbWeb/List/DownloadList/1", "https://services.azre.gov/PdbWeb/List/DownloadList/2"
+    f = Firms()
+    for r in csv.DictReader(open(fetch(u1, "az_individual.csv"), encoding="latin-1")):
+        if r["LicStatus"].strip() == "Active" and r["LicCategory"].strip() == "Real Estate" and r["EmployerLicNumber"].strip():
+            k = r["EmployerLicNumber"].strip()
+            f.add(k, r["LicNumber"].strip(), N(r["EmployerDBAName"]) or N(r["EmployerLegalName"]))
+            f.set_info(k, reg_phone=r["EmployerPhone"], reg_fax=r["EmployerFax"])
+    for r in csv.DictReader(open(fetch(u2, "az_entity.csv"), encoding="latin-1")):
+        k = r["LicNumber"].strip()
+        if k in f.people:
+            f.set_info(k, name=N(r["LegalName"]), dba=N(r["DBAName"]), address=N(r["Address1"]), city=N(r["City"]),
+                       addr_state=N(r["State"]), zip=r["Zip"][:5], reg_phone=r["Phone"], reg_fax=r["Fax"])
+    return f, u1 + " ; " + u2, "people = Active real estate licensees whose EmployerLicNumber is the firm"
+
+
+# ---------------- WV: Real Estate Commission active rosters ----------------
+def wv():
+    urls = {"Salesperson": "https://rec.wv.gov/media/8/download?inline",
+            "Associate Broker": "https://rec.wv.gov/media/9/download?inline",
+            "Broker": "https://rec.wv.gov/media/10/download?inline"}
+    f = Firms()
+    for t, u in urls.items():
+        for r in xlsx_rows(fetch(u, "wv_" + t.replace(" ", "_") + ".xlsx")):
+            k = r["CompanyNumber"]
+            if not k:
+                continue
+            f.add(k, r["LicenseNumber"], N(r["CompanyName"]))
+            f.set_info(k, address=N(r["CompanyStreet"]), city=N(r["CompanyCity"]),
+                       addr_state=N(r["CompanyState"]), zip=r["CompanyZip"][:5])
+    return f, " ; ".join(urls.values()), "people = salespersons + associate brokers + brokers on the active rosters under the CompanyNumber"
+
+
+ADAPTERS = [("NY", ny), ("CT", ct), ("TX", tx), ("FL", fl), ("CA", ca), ("CO", co), ("OR", or_),
+            ("OH", oh), ("NV", nv), ("AZ", az), ("WV", wv)]
+only = os.environ.get("STATES")
 log = csv.writer(open(LOG, "w", newline=""))
-log.writerow(["state", "url", "status", "message", "persons", "firms_35_75", "date"])
-rows_out = []
-for st, url, fn, fn_parse in SOURCES:
-    ok, msg = fetch(url, os.path.join(RAW, fn))
-    if not ok:
-        log.writerow([st, url, "download_failed", msg, 0, 0, TODAY]); continue
+log.writerow(["state", "source", "status", "message", "firms_total", "firms_35_75", "count_definition", "date"])
+out = []
+for st, fn in ADAPTERS:
+    if only and st not in only.split(","):
+        continue
     try:
-        people = fn_parse(os.path.join(RAW, fn))
-    except Exception as e:  # schema drift -> report, never guess
-        log.writerow([st, url, "parse_failed", repr(e)[:200], 0, 0, TODAY]); continue
-    firms = defaultdict(lambda: {"ids": set(), "names": defaultdict(int), "addr": defaultdict(int)})
-    for p in people:
-        f = firms[p["firm_key"]]
-        f["ids"].add(p["person_id"]); f["names"][p["firm_name"]] += 1
-        f["addr"][(p["address"], p["city"], p["zip"])] += 1
+        f, src, definition = fn()
+    except Exception as e:  # never guess: record the failure
+        log.writerow([st, "", "failed", repr(e)[:300], 0, 0, "", TODAY]); print(st, "FAILED", e); continue
     n = 0
-    for key, f in firms.items():
-        c = len(f["ids"])
+    for k, ppl in f.people.items():
+        c = len(ppl)
         if 35 <= c <= 75:
+            i = f.info.get(k, {})
+            if not i.get("name"):
+                continue
             n += 1
-            addr, city, z = max(f["addr"], key=f["addr"].get)
-            rows_out.append(dict(firm_key=key, brokerage_name=max(f["names"], key=f["names"].get),
-                                 verified_headcount=c, headcount_source=url, state=st,
-                                 city=city, zip=z, address=addr, date_collected=TODAY))
-    log.writerow([st, url, "ok", msg, len(people), n, TODAY])
+            out.append(dict(firm_key=f"{st}:{k}", brokerage_name=i["name"], dba=i.get("dba", ""),
+                            verified_headcount=c, headcount_source=src, count_definition=definition,
+                            state=st, address=i.get("address", ""), city=i.get("city", ""),
+                            addr_state=i.get("addr_state", ""), zip=i.get("zip", ""), county=i.get("county", ""),
+                            reg_phone=i.get("reg_phone", ""), reg_fax=i.get("reg_fax", ""),
+                            date_collected=TODAY))
+    log.writerow([st, src, "ok", "", len(f.people), n, definition, TODAY])
+    print(st, "firms", len(f.people), "in range", n, flush=True)
 
+cols = ["firm_key", "brokerage_name", "dba", "verified_headcount", "headcount_source", "count_definition",
+        "state", "address", "city", "addr_state", "zip", "county", "reg_phone", "reg_fax", "date_collected"]
 with open(OUT, "w", newline="") as fh:
-    w = csv.DictWriter(fh, fieldnames=["firm_key", "brokerage_name", "verified_headcount",
-                                       "headcount_source", "state", "city", "zip", "address", "date_collected"])
-    w.writeheader(); w.writerows(rows_out)
-print(f"firms with verified headcount 35-75: {len(rows_out)}")
+    w = csv.DictWriter(fh, fieldnames=cols); w.writeheader(); w.writerows(out)
+print("total firms 35-75:", len(out))
