@@ -39,6 +39,17 @@ dcache_path = os.path.join(DATA, "directors_cache.json")
 dcache = json.load(open(dcache_path)) if os.path.exists(dcache_path) else {}
 
 
+ROLES = {"director", "llp-designated-member", "llp-member", "corporate-director", "corporate-llp-designated-member"}
+
+
+def pretty(name):
+    """'SMITH, Jane Anne' -> 'Jane Anne Smith' (corporate officer names left as they are)."""
+    if "," in name:
+        last, first = name.split(",", 1)
+        return f"{first.strip()} {last.strip().title()}"
+    return name
+
+
 def directors(cn):
     if not key:
         return ""
@@ -49,7 +60,8 @@ def directors(cn):
     for attempt in range(4):
         try:
             d = json.load(urllib.request.urlopen(req, timeout=20))
-            names = [o["name"] for o in d.get("items", []) if o.get("officer_role") == "director" and not o.get("resigned_on")]
+            names = [pretty(o["name"]) for o in d.get("items", [])
+                     if o.get("officer_role") in ROLES and not o.get("resigned_on")]
             dcache[cn] = "; ".join(names)
             time.sleep(0.5)  # CH limit: 600 requests / 5 minutes
             return dcache[cn]
