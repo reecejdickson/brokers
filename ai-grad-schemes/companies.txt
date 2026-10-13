@@ -1,0 +1,51 @@
+# name | candidate ATS slugs
+Isomorphic Labs | isomorphiclabs | isomorphic-labs
+Nscale | nscale
+Wayve | wayve
+PhysicsX | physicsx
+CuspAI | cuspai | cusp-ai
+Lawhive | lawhive
+Fractile | fractile
+Granola | granola
+9fin | 9fin
+Synthesia | synthesia
+ElevenLabs | elevenlabs
+Cleo | cleo | meetcleo
+Tractable | tractable
+Faculty | faculty | facultyai
+Quantexa | quantexa
+Luminance | luminance
+Speechmatics | speechmatics
+PolyAI | polyai
+Helsing | helsing
+Stability AI | stabilityai | stability
+Cohere | cohere
+Mistral AI | mistral
+Anthropic | anthropic
+OpenAI | openai
+Scale AI | scaleai
+Hugging Face | huggingface
+Harvey | harvey
+Perplexity | perplexity | perplexityai
+Databricks | databricks
+Cera | cera | ceracare
+Signal AI | signalai | signal-ai
+Robin AI | robinai | robin-ai
+Peak AI | peak | peakai
+Ineffable Intelligence | ineffable | ineffableintelligence
+Olix | olix
+Swap | swap | swapcommerce
+Writer | writer
+Glean | glean | gleanwork
+Cognition | cognition
+Sierra | sierra
+Decagon | decagon
+Abridge | abridge
+Runway | runwayml | runway
+Anysphere (Cursor) | anysphere | cursor
+Lovable | lovable
+Synthflow | synthflow
+Legora | legora
+Parloa | parloa
+Black Forest Labs | blackforestlabs
+Hebbia | hebbia
